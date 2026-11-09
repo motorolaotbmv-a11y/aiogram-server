@@ -1,202 +1,136 @@
-
 const express = require("express");
-const TelegramBot = require("node-telegram-bot-api");
+const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
-const crypto = require("crypto");
 
 const app = express();
-app.use(express.json());
+app.use(cors());
+app.use(express.json({ limit: "32kb" }));
 
-const {
-  BOT_TOKEN,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  CODE_SECRET
-} = process.env;
-
-if (!BOT_TOKEN || !SUPABASE_URL ||
-    !SUPABASE_SERVICE_ROLE_KEY || !CODE_SECRET) {
-  throw new Error("Не заданы секретные настройки сервера");
+const { SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error("Set SUPABASE_URL and SUPABASE_ANON_KEY in the server environment");
 }
 
-const db = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false }
+});
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-
-const hash = value =>
-  crypto.createHmac("sha256", CODE_SECRET)
-    .update(value).digest("hex");
-
-const randomCode = () =>
-  String(crypto.randomInt(100000, 1000000));
-
-const randomNumber = () =>
-  "+7" + String(crypto.randomInt(10000000, 100000000));
-
-async function createAccount() {
-  for (let i = 0; i < 5; i++) {
-    const number = randomNumber();
-    const code = randomCode();
-
-    const { data, error } = await db
-      .from("accounts")
-      .insert({
-        virtual_number: number,
-        login_code_hash: hash(code),
-        username: "Новый пользователь"
-      })
-      .select("id, virtual_number")
-      .single();
-
-    if (!error) {
-      return { ...data, code };
-    }
-
-    if (error.code !== "23505") {
-      throw error;
-    }
-  }
-
-  throw new Error("Не удалось создать уникальный номер");
+function userClient(token) {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${token}` } }
+  });
 }
 
-bot.onText(/^\/start$/, async msg => {
-  bot.sendMessage(
-    msg.chat.id,
-    "Добро пожаловать в AIO GRAM!\n\n" +
-    "Для создания нового аккаунта отправь /new"
-  );
+async function requireUser(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!token) return res.status(401).json({ error: "Требуется вход" });
+
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data.user) return res.status(401).json({ error: "Сессия недействительна" });
+
+  req.user = data.user;
+  req.db = userClient(token);
+  next();
+}
+
+app.get("/health", (_req, res) => {
+  res.json({ service: "AIOGRAM", status: "online" });
 });
 
-bot.onText(/^\/new$/, async msg => {
+app.post("/auth/register", async (req, res) => {
   try {
-    const account = await createAccount();
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "ТВОЙ НОВЫЙ AIO GRAM АККАУНТ\n\n" +
-      "Номер: " + account.virtual_number + "\n" +
-      "Код входа: " + account.code + "\n\n" +
-      "Сохрани эти данные. Код одноразовый."
-    );
-  } catch (error) {
-    console.error("Account creation error:", error);
-    bot.sendMessage(msg.chat.id, "Ошибка создания аккаунта. Попробуй позже.");
-  }
-});
-
-app.get("/health", (req, res) => {
-  res.json({ status: "AIO GRAM server online" });
-});
-
-app.post("/auth/verify", async (req, res) => {
-  try {
-    const { number, code } = req.body || {};
-
-    if (
-      typeof number !== "string" ||
-      typeof code !== "string" ||
-      !/^\+7\d{8}$/.test(number) ||
-      !/^\d{6}$/.test(code)
-    ) {
-      return res.status(400).json({ error: "Неверные данные" });
-    }
-
-    const { data: account, error } = await db
-      .from("accounts")
-      .select("id, virtual_number, username, login_code_hash")
-      .eq("virtual_number", number)
-      .eq("is_deleted", false)
-      .maybeSingle();
-
-    if (error || !account || !account.login_code_hash ||
-        hash(code) !== account.login_code_hash) {
-      return res.status(401).json({ error: "Неверный номер или код" });
-    }
-
-    const token = crypto.randomBytes(32).toString("hex");
-
-    const { error: updateError } = await db
-      .from("accounts")
-      .update({ login_code_hash: null })
-      .eq("id", account.id)
-      .eq("login_code_hash", account.login_code_hash);
-
-    if (updateError) {
-      throw updateError;
-    }
-
-    const { error: sessionError } = await db
-      .from("sessions")
-      .insert({
-        account_id: account.id,
-        token_hash: hash(token),
-        expires_at: new Date(
-          Date.now() + 30 * 24 * 60 * 60 * 1000
-        ).toISOString()
+    const { email, password, username } = req.body || {};
+    if (typeof email !== "string" || typeof password !== "string" ||
+        typeof username !== "string" || !/^[a-zA-Z0-9_]{3,24}$/.test(username) ||
+        password.length < 8 || password.length > 128) {
+      return res.status(400).json({
+        error: "Укажи email, пароль от 8 символов и логин 3–24 символа (латиница, цифры, _)"
       });
-
-    if (sessionError) {
-      throw sessionError;
     }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim().toLowerCase(),
+      password,
+      options: { data: { username } }
+    });
+
+    if (error) return res.status(400).json({ error: error.message });
+    res.status(201).json({
+      success: true,
+      confirmationRequired: !data.session,
+      message: data.session ? "Аккаунт создан" : "Проверь почту для подтверждения",
+      token: data.session?.access_token || null,
+      user: data.user ? { id: data.user.id, email: data.user.email } : null
+    });
+  } catch (error) {
+    console.error("register:", error);
+    res.status(500).json({ error: "Внутренняя ошибка сервера" });
+  }
+});
+
+app.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (typeof email !== "string" || typeof password !== "string") {
+      return res.status(400).json({ error: "Укажи email и пароль" });
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
+      password
+    });
+    if (error) return res.status(401).json({ error: "Неверный email или пароль" });
 
     res.json({
       success: true,
-      token,
-      account: {
-        number: account.virtual_number,
-        username: account.username
-      }
+      token: data.session.access_token,
+      user: { id: data.user.id, email: data.user.email }
     });
   } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ error: "Ошибка сервера" });
+    console.error("login:", error);
+    res.status(500).json({ error: "Внутренняя ошибка сервера" });
   }
 });
 
-app.get("/auth/me", async (req, res) => {
-  try {
-    const token = (req.headers.authorization || "")
-      .replace(/^Bearer /, "");
+app.get("/me", requireUser, async (req, res) => {
+  const { data, error } = await req.db
+    .from("profiles")
+    .select("id, username, display_name, created_at")
+    .eq("id", req.user.id)
+    .maybeSingle();
 
-    if (!/^[a-f0-9]{64}$/.test(token)) {
-      return res.status(401).json({ error: "Нет авторизации" });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({
+    success: true,
+    user: {
+      id: req.user.id,
+      email: req.user.email,
+      profile: data
     }
+  });
+});
 
-    const { data: session, error } = await db
-      .from("sessions")
-      .select("account_id, expires_at")
-      .eq("token_hash", hash(token))
-      .gt("expires_at", new Date().toISOString())
-      .maybeSingle();
-
-    if (error || !session) {
-      return res.status(401).json({ error: "Сессия истекла" });
-    }
-
-    const { data: account } = await db
-      .from("accounts")
-      .select("virtual_number, username, stars")
-      .eq("id", session.account_id)
-      .eq("is_deleted", false)
-      .maybeSingle();
-
-    if (!account) {
-      return res.status(401).json({ error: "Аккаунт недоступен" });
-    }
-
-    res.json({ success: true, account });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Ошибка сервера" });
+app.patch("/me", requireUser, async (req, res) => {
+  const { display_name } = req.body || {};
+  if (typeof display_name !== "string" || display_name.trim().length < 1 ||
+      display_name.trim().length > 40) {
+    return res.status(400).json({ error: "Имя должно содержать от 1 до 40 символов" });
   }
+
+  const { data, error } = await req.db
+    .from("profiles")
+    .update({ display_name: display_name.trim() })
+    .eq("id", req.user.id)
+    .select("id, username, display_name, created_at")
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ success: true, profile: data });
 });
 
 const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("AIO GRAM server started on port " + PORT);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`AIOGRAM independent API listening on ${PORT}`);
 });

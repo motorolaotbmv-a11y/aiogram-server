@@ -1,14 +1,18 @@
-
 {
-  "name": "aio-gram-server",
-  "version": "1.0.0",
+  "name": "aiogram-independent-server",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Independent AIOGRAM messenger API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
-    "express": "^5.1.0",
-    "node-telegram-bot-api": "^0.66.0"
+    "cors": "^2.8.5",
+    "express": "^5.1.0"
   }
 }

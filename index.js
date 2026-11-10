@@ -5,7 +5,43 @@ const { createClient } = require("@supabase/supabase-js");
 const crypto = require("crypto");
 
 const app = express();
-app.use(express.json());
+app.disable("x-powered-by");
+app.use(express.json({ limit: "16kb" }));
+
+const rateBuckets = new Map();
+function rateLimit({ windowMs, max, key }) {
+  return (req, res, next) => {
+    const now = Date.now();
+    const bucketKey = key(req);
+    let bucket = rateBuckets.get(bucketKey);
+    if (!bucket || now - bucket.startedAt >= windowMs) {
+      bucket = { startedAt: now, count: 0 };
+      rateBuckets.set(bucketKey, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > max) {
+      const retryAfter = Math.max(1, Math.ceil((windowMs - (now - bucket.startedAt)) / 1000));
+      res.set("Retry-After", String(retryAfter));
+      return res.status(429).json({ error: "Слишком много запросов. Попробуй позже." });
+    }
+    if (rateBuckets.size > 5000) {
+      for (const [storedKey, value] of rateBuckets) {
+        if (now - value.startedAt >= windowMs) rateBuckets.delete(storedKey);
+      }
+    }
+    next();
+  };
+}
+const authRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  key: req => "auth:" + (req.ip || req.socket.remoteAddress || "unknown")
+});
+const safeHashEqual = (left, right) => {
+  if (typeof left !== "string" || typeof right !== "string" ||
+      !/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) return false;
+  return crypto.timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+};
 
 const {
   BOT_TOKEN,
@@ -92,7 +128,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "AIO GRAM server online" });
 });
 
-app.post("/auth/verify", async (req, res) => {
+app.post("/auth/verify", authRateLimit, async (req, res) => {
   try {
     const { number, code } = req.body || {};
 
@@ -113,7 +149,7 @@ app.post("/auth/verify", async (req, res) => {
       .maybeSingle();
 
     if (error || !account || !account.login_code_hash ||
-        hash(code) !== account.login_code_hash) {
+        !safeHashEqual(hash(code), account.login_code_hash)) {
       return res.status(401).json({ error: "Неверный номер или код" });
     }
 
@@ -153,6 +189,21 @@ app.post("/auth/verify", async (req, res) => {
     });
   } catch (error) {
     console.error("Login error:", error);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.post("/auth/logout", async (req, res) => {
+  try {
+    const token = (req.headers.authorization || "").replace(/^Bearer /, "");
+    if (!/^[a-f0-9]{64}$/.test(token)) {
+      return res.status(401).json({ error: "Нет авторизации" });
+    }
+    const { error } = await db.from("sessions").delete().eq("token_hash", hash(token));
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Logout error:", error);
     res.status(500).json({ error: "Ошибка сервера" });
   }
 });

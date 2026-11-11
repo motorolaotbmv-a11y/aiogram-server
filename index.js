@@ -99,7 +99,8 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "register.html")));
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "app.html")));
+app.get("/register", (req, res) => res.redirect("/"));
 app.get("/health", (req, res) => res.json({ status: "online", name: "АИОГРАМ" }));
 
 const emailAuthRateLimit = rateLimit({

@@ -11,11 +11,15 @@ app.use("/panel", express.static(path.join(__dirname, "public"), { index: "admin
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_ANON_KEY,
+  SUPABASE_PUBLISHABLE_KEY,
   CODE_SECRET,
   OWNER_EMAIL
 } = process.env;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !CODE_SECRET) {
+const AUTH_PUBLIC_KEY = SUPABASE_PUBLISHABLE_KEY || SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !AUTH_PUBLIC_KEY || !CODE_SECRET) {
   throw new Error("Не заданы секретные настройки сервера");
 }
 
@@ -105,7 +109,7 @@ const emailAuthRateLimit = rateLimit({
 });
 
 function createAuthClient() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  return createClient(SUPABASE_URL, AUTH_PUBLIC_KEY, {
     auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false }
   });
 }
@@ -184,20 +188,25 @@ app.post("/auth/email/verify", emailAuthRateLimit, async (req, res) => {
 
     }
 
-    if (OWNER_EMAIL && verifiedEmail === String(OWNER_EMAIL).trim().toLowerCase()) {
-      const { error: roleError } = await db.from("account_admins")
-        .upsert({ account_id: account.id, role: "owner" });
-      if (roleError) throw roleError;
-      await db.from("admin_logs").insert({
-        actor_account_id: account.id,
-        action: "owner_bootstrapped",
-        target_account_id: account.id,
-        metadata: { source: "verified_email_otp" }
-      });
-    }
-
     if (account.is_deleted) {
       return res.status(403).json({ error: "Этот аккаунт отключён" });
+    }
+
+    if (OWNER_EMAIL && verifiedEmail === String(OWNER_EMAIL).trim().toLowerCase()) {
+      const { data: currentRole, error: currentRoleError } = await db.from("account_admins")
+        .select("role").eq("account_id", account.id).maybeSingle();
+      if (currentRoleError) throw currentRoleError;
+      if (currentRole?.role !== "owner") {
+        const { error: roleError } = await db.from("account_admins")
+          .upsert({ account_id: account.id, role: "owner" });
+        if (roleError) throw roleError;
+        await db.from("admin_logs").insert({
+          actor_account_id: account.id,
+          action: "owner_bootstrapped",
+          target_account_id: account.id,
+          metadata: { source: "verified_email_otp" }
+        });
+      }
     }
 
     const token = crypto.randomBytes(32).toString("hex");

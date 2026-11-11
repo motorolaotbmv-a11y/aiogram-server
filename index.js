@@ -117,7 +117,7 @@ function createAuthClient() {
 app.post("/auth/email/request", emailAuthRateLimit, async (req, res) => {
   try {
     const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
-    if (email.length > 254 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: "Введи корректный email" });
     }
     const authClient = createAuthClient();
@@ -140,7 +140,7 @@ app.post("/auth/email/verify", emailAuthRateLimit, async (req, res) => {
   try {
     const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
     const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
-    if (email.length > 254 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || !/^\\d{6}$/.test(code)) {
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !/^\d{6}$/.test(code)) {
       return res.status(400).json({ error: "Проверь email и шестизначный код" });
     }
 

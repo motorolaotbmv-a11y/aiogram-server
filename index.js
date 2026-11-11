@@ -46,19 +46,8 @@ function rateLimit({ windowMs, max, key }) {
   };
 }
 
-const authRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  key: req => "auth:" + (req.ip || req.socket.remoteAddress || "unknown")
-});
-
 const hash = value => crypto.createHmac("sha256", CODE_SECRET).update(value).digest("hex");
 const randomNumber = () => "+7" + String(crypto.randomInt(10000000, 100000000));
-const safeHashEqual = (left, right) => {
-  if (typeof left !== "string" || typeof right !== "string" ||
-      !/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) return false;
-  return crypto.timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
-};
 
 async function getSession(token) {
   if (!/^[a-f0-9]{64}$/.test(token)) return null;
@@ -106,7 +95,7 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-app.get("/", (req, res) => res.send("АИОГРАМ работает"));
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "register.html")));
 app.get("/health", (req, res) => res.json({ status: "online", name: "АИОГРАМ" }));
 
 const emailAuthRateLimit = rateLimit({
@@ -193,17 +182,18 @@ app.post("/auth/email/verify", emailAuthRateLimit, async (req, res) => {
       }
       if (!account) throw new Error("Не удалось создать уникальный номер аккаунта");
 
-      if (OWNER_EMAIL && verifiedEmail === String(OWNER_EMAIL).trim().toLowerCase()) {
-        const { error: roleError } = await db.from("account_admins")
-          .upsert({ account_id: account.id, role: "owner" });
-        if (roleError) throw roleError;
-        await db.from("admin_logs").insert({
-          actor_account_id: account.id,
-          action: "owner_bootstrapped",
-          target_account_id: account.id,
-          metadata: { source: "verified_email_otp" }
-        });
-      }
+    }
+
+    if (OWNER_EMAIL && verifiedEmail === String(OWNER_EMAIL).trim().toLowerCase()) {
+      const { error: roleError } = await db.from("account_admins")
+        .upsert({ account_id: account.id, role: "owner" });
+      if (roleError) throw roleError;
+      await db.from("admin_logs").insert({
+        actor_account_id: account.id,
+        action: "owner_bootstrapped",
+        target_account_id: account.id,
+        metadata: { source: "verified_email_otp" }
+      });
     }
 
     if (account.is_deleted) {

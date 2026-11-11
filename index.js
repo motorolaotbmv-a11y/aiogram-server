@@ -64,7 +64,7 @@ async function getSession(token) {
   if (error || !session) return null;
 
   const { data: account, error: accountError } = await db.from("accounts")
-    .select("id, virtual_number, username, email, stars, is_deleted")
+    .select("id, auth_user_id, virtual_number, username, email, stars, is_deleted")
     .eq("id", session.account_id)
     .eq("is_deleted", false)
     .maybeSingle();
@@ -243,6 +243,191 @@ app.post("/auth/logout", requireUser, async (req, res) => {
   } catch (error) {
     console.error("Logout error:", error);
     res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+
+// API переписок АИОГРАМ. Все запросы проверяют участника чата на сервере.
+function requireChatIdentity(req, res, next) {
+  if (!req.auth.account.auth_user_id) {
+    return res.status(403).json({ error: "Для аккаунта не привязана учётная запись Auth" });
+  }
+  req.userId = req.auth.account.auth_user_id;
+  next();
+}
+
+const chatRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  key: req => "chat-api:" + (req.auth?.account?.id || req.ip || "unknown")
+});
+
+app.get("/api/users/search", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const number = typeof req.query.number === "string" ? req.query.number.trim() : "";
+    if (!/^\+7\d{8}$/.test(number)) {
+      return res.status(400).json({ error: "Укажи полный номер АИОГРАМ, например +712345678" });
+    }
+    const { data, error } = await db.from("accounts")
+      .select("auth_user_id, virtual_number, username")
+      .eq("virtual_number", number)
+      .eq("is_deleted", false)
+      .not("auth_user_id", "is", null)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data || data.auth_user_id === req.userId) {
+      return res.status(404).json({ error: "Пользователь не найден" });
+    }
+    res.json({ success: true, user: { number: data.virtual_number, username: data.username } });
+  } catch (error) {
+    console.error("User search error:", error);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.get("/api/chats", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const { data: memberships, error: membershipError } = await db.from("chat_members")
+      .select("chat_id, joined_at").eq("user_id", req.userId);
+    if (membershipError) throw membershipError;
+    const chatIds = (memberships || []).map(row => row.chat_id);
+    if (!chatIds.length) return res.json({ success: true, chats: [] });
+
+    const [{ data: chats, error: chatsError }, { data: members, error: membersError }, { data: messages, error: messagesError }] = await Promise.all([
+      db.from("chats").select("id, title, is_group, created_at").in("id", chatIds).order("created_at", { ascending: false }),
+      db.from("chat_members").select("chat_id, user_id").in("chat_id", chatIds),
+      db.from("messages").select("id, chat_id, sender_id, content, created_at").in("chat_id", chatIds).order("created_at", { ascending: false }).limit(200)
+    ]);
+    if (chatsError) throw chatsError;
+    if (membersError) throw membersError;
+    if (messagesError) throw messagesError;
+
+    const userIds = [...new Set((members || []).map(row => row.user_id))];
+    const { data: accounts, error: accountsError } = await db.from("accounts")
+      .select("auth_user_id, virtual_number, username").in("auth_user_id", userIds);
+    if (accountsError) throw accountsError;
+    const accountById = new Map((accounts || []).map(row => [row.auth_user_id, row]));
+    const latestByChat = new Map();
+    for (const message of messages || []) {
+      if (!latestByChat.has(message.chat_id)) latestByChat.set(message.chat_id, message);
+    }
+    const membersByChat = new Map();
+    for (const member of members || []) {
+      if (!membersByChat.has(member.chat_id)) membersByChat.set(member.chat_id, []);
+      const account = accountById.get(member.user_id);
+      if (account) membersByChat.get(member.chat_id).push({
+        number: account.virtual_number, username: account.username, is_self: member.user_id === req.userId
+      });
+    }
+    res.json({
+      success: true,
+      chats: (chats || []).map(chat => ({
+        id: chat.id, title: chat.title, is_group: !!chat.is_group,
+        members: membersByChat.get(chat.id) || [],
+        last_message: latestByChat.get(chat.id) || null
+      }))
+    });
+  } catch (error) {
+    console.error("Chat list error:", error);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.post("/api/chats/direct", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const number = typeof req.body?.number === "string" ? req.body.number.trim() : "";
+    if (!/^\+7\d{8}$/.test(number)) return res.status(400).json({ error: "Неверный номер пользователя" });
+    const { data: target, error: targetError } = await db.from("accounts")
+      .select("id, auth_user_id, virtual_number, username")
+      .eq("virtual_number", number).eq("is_deleted", false)
+      .not("auth_user_id", "is", null).maybeSingle();
+    if (targetError) throw targetError;
+    if (!target || target.auth_user_id === req.userId) {
+      return res.status(404).json({ error: "Пользователь не найден" });
+    }
+
+    const { data: mine, error: mineError } = await db.from("chat_members")
+      .select("chat_id").eq("user_id", req.userId);
+    if (mineError) throw mineError;
+    const mineIds = (mine || []).map(row => row.chat_id);
+    if (mineIds.length) {
+      const { data: shared, error: sharedError } = await db.from("chat_members")
+        .select("chat_id").eq("user_id", target.auth_user_id).in("chat_id", mineIds);
+      if (sharedError) throw sharedError;
+      const candidateIds = (shared || []).map(row => row.chat_id);
+      if (candidateIds.length) {
+        const { data: candidateChats, error: candidateError } = await db.from("chats")
+          .select("id, is_group").in("id", candidateIds).eq("is_group", false);
+        if (candidateError) throw candidateError;
+        if (candidateChats?.length) {
+          const existingId = candidateChats[0].id;
+          return res.json({ success: true, chat_id: existingId, existing: true });
+        }
+      }
+    }
+
+    const { data: chat, error: createError } = await db.from("chats")
+      .insert({ is_group: false, created_by: req.userId })
+      .select("id").single();
+    if (createError) throw createError;
+    const { error: membersError } = await db.from("chat_members").insert([
+      { chat_id: chat.id, user_id: req.userId },
+      { chat_id: chat.id, user_id: target.auth_user_id }
+    ]);
+    if (membersError) {
+      await db.from("chats").delete().eq("id", chat.id);
+      throw membersError;
+    }
+    res.status(201).json({ success: true, chat_id: chat.id, existing: false });
+  } catch (error) {
+    console.error("Create direct chat error:", error);
+    res.status(500).json({ error: "Не удалось создать чат" });
+  }
+});
+
+app.get("/api/chats/:id/messages", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const { data: membership, error: membershipError } = await db.from("chat_members")
+      .select("chat_id").eq("chat_id", req.params.id).eq("user_id", req.userId).maybeSingle();
+    if (membershipError) throw membershipError;
+    if (!membership) return res.status(404).json({ error: "Чат не найден" });
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+    const { data, error } = await db.from("messages")
+      .select("id, chat_id, sender_id, content, created_at")
+      .eq("chat_id", req.params.id).order("created_at", { ascending: false }).limit(limit);
+    if (error) throw error;
+    res.json({ success: true, messages: (data || []).reverse().map(message => ({
+      id: message.id, sender_id: message.sender_id, content: message.content,
+      created_at: message.created_at, is_self: message.sender_id === req.userId
+    })) });
+  } catch (error) {
+    console.error("Message list error:", error);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.post("/api/chats/:id/messages", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
+    if (!content || content.length > 4000) {
+      return res.status(400).json({ error: "Сообщение должно содержать от 1 до 4000 символов" });
+    }
+    const { data: membership, error: membershipError } = await db.from("chat_members")
+      .select("chat_id").eq("chat_id", req.params.id).eq("user_id", req.userId).maybeSingle();
+    if (membershipError) throw membershipError;
+    if (!membership) return res.status(404).json({ error: "Чат не найден" });
+
+    const { data: message, error } = await db.from("messages").insert({
+      chat_id: req.params.id, sender_id: req.userId, content
+    }).select("id, sender_id, content, created_at").single();
+    if (error) throw error;
+    res.status(201).json({ success: true, message: {
+      id: message.id, sender_id: message.sender_id, content: message.content,
+      created_at: message.created_at, is_self: true
+    }});
+  } catch (error) {
+    console.error("Send message error:", error);
+    res.status(500).json({ error: "Не удалось отправить сообщение" });
   }
 });
 

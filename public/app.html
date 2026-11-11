@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101827">
+<title>АИОГРАМ</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,Arial,sans-serif;background:#0b1220;color:#edf3ff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#0b1220}button,input{font:inherit}
+button{cursor:pointer;border:0}.hidden{display:none!important}
+#auth{min-height:100vh;display:grid;place-items:center;padding:20px;background:radial-gradient(ellipse at 50% 0,#1b3a67 0,transparent 52%),#0b1220}
+.auth-card{width:min(100%,430px);padding:28px;border:1px solid #2b3d59;border-radius:25px;background:#111c2d;box-shadow:0 25px 80px #0008}
+.logo{font-size:25px;font-weight:950;letter-spacing:1px}.logo span{color:#79adff}.tag{color:#8497b3;font-size:12px;margin-top:5px;letter-spacing:1px}
+h1{font-size:26px;margin:32px 0 8px}.muted{color:#93a4bd;font-size:14px;line-height:1.5}
+label{display:block;margin:22px 0 8px;color:#bdcbe0;font-size:13px}
+input{width:100%;padding:14px 15px;border:1px solid #354966;border-radius:13px;background:#0b1422;color:#fff;outline:none;min-width:0}
+input:focus{border-color:#78aaff;box-shadow:0 0 0 3px #78aaff20}
+.primary{width:100%;padding:14px;margin-top:16px;border-radius:13px;background:linear-gradient(100deg,#3479e7,#68a4ff);color:white;font-weight:800}
+.primary:disabled{opacity:.5}.message{min-height:22px;margin-top:13px;font-size:13px;color:#ffabb6}.message.ok{color:#81dfb0}
+#app{height:100dvh;display:grid;grid-template-columns:340px 1fr;max-width:1200px;margin:auto;background:#101a2a;border-left:1px solid #25344a;border-right:1px solid #25344a}
+.sidebar{display:flex;flex-direction:column;min-width:0;border-right:1px solid #29384e}
+.top{height:72px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #29384e}
+.top .logo{font-size:20px}.account{font-size:11px;color:#8ea1bc;margin-top:3px}
+.icon-btn{width:40px;height:40px;border-radius:12px;background:#1d2b40;color:#dce8fb;font-size:20px}
+.search{padding:13px 14px;border-bottom:1px solid #29384e}.search input{padding:12px}
+.chat-list{overflow:auto;flex:1}.chat-item{width:100%;padding:14px;display:flex;gap:12px;text-align:left;background:transparent;color:inherit;border-bottom:1px solid #202e42}
+.chat-item.active,.chat-item:hover{background:#1c2c43}.avatar{width:46px;height:46px;flex:0 0 46px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(145deg,#2d5b95,#24334b);font-weight:800;color:#dbeaff}
+.chat-info{min-width:0;flex:1}.chat-name{font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.preview{font-size:12px;color:#8fa2bc;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.empty-list{padding:30px 20px;text-align:center;color:#8193ad;font-size:13px;line-height:1.6}
+.conversation{min-width:0;display:flex;flex-direction:column;background:radial-gradient(ellipse at 50% 0,#172941 0,transparent 55%),#0d1726}
+.chat-head{height:72px;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid #29384e}
+.chat-head .back{display:none}.chat-head-title{font-weight:800}.chat-head-sub{font-size:12px;color:#8ea1bc;margin-top:3px}
+.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:9px}
+.hint{margin:auto;color:#8092ac;text-align:center;font-size:14px;line-height:1.6;max-width:280px}
+.bubble{max-width:min(78%,560px);padding:11px 14px;border-radius:16px;background:#1d2c42;color:#edf3ff;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.4}
+.bubble.self{align-self:flex-end;background:#28558c}.time{display:block;text-align:right;font-size:10px;color:#a9bad0;margin-top:5px}
+.composer{padding:13px 16px calc(13px + env(safe-area-inset-bottom));display:flex;gap:10px;border-top:1px solid #29384e;background:#111d2d}
+.composer input{flex:1}.send{padding:0 20px;border-radius:13px;background:#4388ed;color:white;font-weight:800}
+.notice{padding:10px 14px;font-size:12px;color:#91a5c1;text-align:center}
+@media(max-width:700px){#app{grid-template-columns:1fr}.sidebar{border-right:0}.conversation{display:none}.conversation.mobile-open{display:flex;position:fixed;inset:0;z-index:2}.conversation.mobile-open~.sidebar{display:none}.chat-head .back{display:block}.top{height:64px}}
+</style>
+</head>
+<body>
+<section id="auth">
+ <main class="auth-card">
+  <div class="logo">АИО<span>ГРАМ</span></div><div class="tag">ТВОЁ ОБЩЕНИЕ. ТВОИ ПРАВИЛА.</div>
+  <h1 id="authTitle">Вход в АИОГРАМ</h1>
+  <div class="muted">Войди по электронной почте. Мы отправим одноразовый код подтверждения.</div>
+  <label for="email">Электронная почта</label><input id="email" type="email" autocomplete="email" placeholder="name@example.com">
+  <div id="codeWrap" class="hidden"><label for="code">Код из письма</label><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 цифр"></div>
+  <button id="authAction" class="primary">Отправить код</button><div id="authMsg" class="message" aria-live="polite"></div>
+  <div class="muted" style="margin-top:24px;font-size:12px">Никому не сообщай код входа. Администрация не читает личные переписки.</div>
+ </main>
+</section>
+<section id="app" class="hidden">
+ <aside class="sidebar">
+  <header class="top"><div><div class="logo">АИО<span>ГРАМ</span></div><div class="account" id="myNumber"></div></div><button id="newChat" class="icon-btn" aria-label="Новый чат">＋</button></header>
+  <div class="search"><input id="filterChats" placeholder="Поиск по чатам"></div>
+  <div id="chatList" class="chat-list"><div class="empty-list">Загружаем чаты…</div></div>
+  <div class="notice"><button id="logout" style="background:none;color:#91a5c1">Выйти из аккаунта</button></div>
+ </aside>
+ <main id="conversation" class="conversation">
+  <header class="chat-head"><button id="back" class="icon-btn back">‹</button><div><div class="chat-head-title" id="chatTitle">АИОГРАМ</div><div class="chat-head-sub" id="chatSub">Выбери чат или начни новый</div></div></header>
+  <div id="messages" class="messages"><div class="hint">Твои личные переписки будут отображаться здесь</div></div>
+  <form id="composer" class="composer hidden"><input id="messageInput" maxlength="4000" autocomplete="off" placeholder="Сообщение…"><button class="send" type="submit">➤</button></form>
+ </main>
+</section>
+<script>
+const $=id=>document.getElementById(id);
+const API="";
+let token=localStorage.getItem("aiogram_token")||"";
+let me=null, chats=[], activeChat=null, poller=null, authSent=false;
+function authMessage(text,ok=false){$("authMsg").textContent=text;$("authMsg").className="message"+(ok?" ok":"")}
+async function request(path,options={}) {
+ const headers={"Content-Type":"application/json",...(options.headers||{})};
+ if(token) headers.Authorization="Bearer "+token;
+ const response=await fetch(API+path,{...options,headers});
+ const data=await response.json().catch(()=>({error:"Сервер вернул некорректный ответ"}));
+ if(!response.ok) throw new Error(data.error||"Ошибка запроса");
+ return data;
+}
+async function sendAuth(){
+ const email=$("email").value.trim().toLowerCase();
+ $("authAction").disabled=true;
+ try{
+  if(!authSent){
+   authMessage("Отправляем код…");
+   await request("/auth/email/request",{method:"POST",body:JSON.stringify({email})});
+   authSent=true;$("codeWrap").classList.remove("hidden");$("authAction").textContent="Подтвердить вход";$("code").focus();
+   authMessage("Код отправлен. Проверь входящие и папку «Спам».",true);
+  }else{
+   authMessage("Проверяем код…");
+   const data=await request("/auth/email/verify",{method:"POST",body:JSON.stringify({email,code:$("code").value.trim()})});
+   token=data.token;localStorage.setItem("aiogram_token",token);await startApp();
+  }
+ }catch(error){authMessage(error.message)}finally{$("authAction").disabled=false}
+}
+$("authAction").addEventListener("click",sendAuth);
+$("email").addEventListener("keydown",e=>{if(e.key==="Enter")sendAuth()});
+$("code").addEventListener("keydown",e=>{if(e.key==="Enter")sendAuth()});
+function showAuth(){clearInterval(poller);$("app").classList.add("hidden");$("auth").classList.remove("hidden");}
+async function startApp(){
+ try{
+  const data=await request("/auth/me");me=data.account;
+  $("myNumber").textContent=me.number+" · "+me.username;
+  $("auth").classList.add("hidden");$("app").classList.remove("hidden");
+  await loadChats();
+  clearInterval(poller);poller=setInterval(async()=>{try{await loadChats();if(activeChat)await loadMessages(activeChat.id)}catch(e){}},5000);
+ }catch(error){localStorage.removeItem("aiogram_token");token="";showAuth();authMessage(error.message)}
+}
+function chatName(chat){
+ if(chat.title)return chat.title;
+ const other=(chat.members||[]).find(x=>!x.is_self);
+ return other?(other.username||other.number):"Личный чат";
+}
+function escapeText(value){return String(value??"")}
+function renderChats(){
+ const filter=$("filterChats").value.trim().toLowerCase();
+ const visible=chats.filter(c=>chatName(c).toLowerCase().includes(filter)||(c.members||[]).some(m=>(m.number||"").includes(filter)));
+ const list=$("chatList");list.replaceChildren();
+ if(!visible.length){const empty=document.createElement("div");empty.className="empty-list";empty.textContent=filter?"Ничего не найдено":"Пока нет чатов. Нажми ＋, чтобы начать общение";list.append(empty);return}
+ for(const chat of visible){
+  const button=document.createElement("button");button.className="chat-item"+(activeChat?.id===chat.id?" active":"");
+  const avatar=document.createElement("div");avatar.className="avatar";avatar.textContent=chatName(chat).slice(0,1).toUpperCase();
+  const info=document.createElement("div");info.className="chat-info";
+  const name=document.createElement("div");name.className="chat-name";name.textContent=chatName(chat);
+  const preview=document.createElement("div");preview.className="preview";preview.textContent=chat.last_message?.content||"Нет сообщений";
+  info.append(name,preview);button.append(avatar,info);button.addEventListener("click",()=>openChat(chat));list.append(button);
+ }
+}
+$("filterChats").addEventListener("input",renderChats);
+async function loadChats(){
+ const data=await request("/api/chats");chats=data.chats||[];renderChats();
+ if(activeChat){const fresh=chats.find(c=>c.id===activeChat.id);if(fresh){activeChat=fresh;$("chatTitle").textContent=chatName(fresh)}}
+}
+async function openChat(chat){
+ activeChat=chat;$("conversation").classList.add("mobile-open");$("chatTitle").textContent=chatName(chat);
+ const other=(chat.members||[]).find(x=>!x.is_self);$("chatSub").textContent=other?.number||"Личный чат";
+ $("composer").classList.remove("hidden");renderChats();await loadMessages(chat.id);
+}
+function formatTime(value){try{return new Date(value).toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"})}catch(e){return""}}
+async function loadMessages(id){
+ const data=await request("/api/chats/"+encodeURIComponent(id)+"/messages?limit=80");
+ if(activeChat?.id!==id)return;
+ const box=$("messages");box.replaceChildren();
+ if(!data.messages?.length){const hint=document.createElement("div");hint.className="hint";hint.textContent="Это начало вашей переписки. Напиши первое сообщение";box.append(hint);return}
+ for(const message of data.messages){
+  const bubble=document.createElement("div");bubble.className="bubble"+(message.is_self?" self":"");
+  const content=document.createElement("div");content.textContent=escapeText(message.content);
+  const time=document.createElement("span");time.className="time";time.textContent=formatTime(message.created_at);
+  bubble.append(content,time);box.append(bubble);
+ }
+ box.scrollTop=box.scrollHeight;
+}
+$("composer").addEventListener("submit",async event=>{
+ event.preventDefault();if(!activeChat)return;
+ const input=$("messageInput"),content=input.value.trim();if(!content)return;
+ const button=$("composer").querySelector("button");button.disabled=true;
+ try{await request("/api/chats/"+encodeURIComponent(activeChat.id)+"/messages",{method:"POST",body:JSON.stringify({content})});input.value="";await loadMessages(activeChat.id);await loadChats()}
+ catch(error){alert(error.message)}finally{button.disabled=false;input.focus()}
+});
+$("newChat").addEventListener("click",async()=>{
+ const number=prompt("Введи номер пользователя АИОГРАМ, например +712345678");
+ if(!number)return;
+ try{
+  const data=await request("/api/chats/direct",{method:"POST",body:JSON.stringify({number:number.trim()})});
+  await loadChats();const chat=chats.find(c=>c.id===data.chat_id);if(chat)await openChat(chat);
+ }catch(error){alert(error.message)}
+});
+$("back").addEventListener("click",()=>$("conversation").classList.remove("mobile-open"));
+$("logout").addEventListener("click",async()=>{
+ try{await request("/auth/logout",{method:"POST"})}catch(e){}
+ localStorage.removeItem("aiogram_token");token="";me=null;activeChat=null;showAuth();
+});
+if(token)startApp();else showAuth();
+</script>
+</body></html>

@@ -1,5 +1,4 @@
 const express = require("express");
-const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 const crypto = require("crypto");
 const path = require("path");
@@ -10,19 +9,17 @@ app.use(express.json({ limit: "16kb" }));
 app.use("/panel", express.static(path.join(__dirname, "public"), { index: "admin.html" }));
 
 const {
-  BOT_TOKEN,
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   CODE_SECRET,
-  OWNER_TELEGRAM_ID
+  OWNER_EMAIL
 } = process.env;
 
-if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !CODE_SECRET) {
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !CODE_SECRET) {
   throw new Error("Не заданы секретные настройки сервера");
 }
 
 const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 const rateBuckets = new Map();
 function rateLimit({ windowMs, max, key }) {
@@ -56,52 +53,12 @@ const authRateLimit = rateLimit({
 });
 
 const hash = value => crypto.createHmac("sha256", CODE_SECRET).update(value).digest("hex");
-const randomCode = () => String(crypto.randomInt(100000, 1000000));
 const randomNumber = () => "+7" + String(crypto.randomInt(10000000, 100000000));
 const safeHashEqual = (left, right) => {
   if (typeof left !== "string" || typeof right !== "string" ||
       !/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) return false;
   return crypto.timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 };
-
-async function createAccount(msg) {
-  const telegramId = String(msg.from.id);
-  const { data: existing, error: lookupError } = await db
-    .from("accounts").select("id, virtual_number")
-    .eq("telegram_user_id", telegramId).maybeSingle();
-  if (lookupError) throw lookupError;
-  if (existing) return { existing: true, ...existing };
-
-  for (let i = 0; i < 5; i++) {
-    const number = randomNumber();
-    const code = randomCode();
-    const { data, error } = await db.from("accounts").insert({
-      virtual_number: number,
-      telegram_user_id: telegramId,
-      login_code_hash: hash(code),
-      code_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-      failed_login_attempts: 0,
-      username: msg.from.username || "Новый пользователь"
-    }).select("id, virtual_number").single();
-
-    if (!error) {
-      if (OWNER_TELEGRAM_ID && telegramId === String(OWNER_TELEGRAM_ID)) {
-        const { error: roleError } = await db.from("account_admins")
-          .upsert({ account_id: data.id, role: "owner" });
-        if (roleError) throw roleError;
-        await db.from("admin_logs").insert({
-          actor_account_id: data.id,
-          action: "owner_bootstrapped",
-          target_account_id: data.id,
-          metadata: { source: "verified_telegram_bot" }
-        });
-      }
-      return { ...data, code };
-    }
-    if (error.code !== "23505") throw error;
-  }
-  throw new Error("Не удалось создать уникальный номер");
-}
 
 async function getSession(token) {
   if (!/^[a-f0-9]{64}$/.test(token)) return null;
@@ -114,7 +71,7 @@ async function getSession(token) {
   if (error || !session) return null;
 
   const { data: account, error: accountError } = await db.from("accounts")
-    .select("id, virtual_number, username, stars, is_deleted")
+    .select("id, virtual_number, username, email, stars, is_deleted")
     .eq("id", session.account_id)
     .eq("is_deleted", false)
     .maybeSingle();
@@ -149,68 +106,109 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-bot.onText(/^\/start$/, msg => {
-  bot.sendMessage(msg.chat.id,
-    "Добро пожаловать в АИОГРАМ!\n\nДля создания аккаунта отправь /new");
-});
-
-bot.onText(/^\/new$/, async msg => {
-  try {
-    const account = await createAccount(msg);
-    if (account.existing) {
-      return bot.sendMessage(msg.chat.id,
-        "У тебя уже есть аккаунт АИОГРАМ. Номер: " + account.virtual_number);
-    }
-    await bot.sendMessage(msg.chat.id,
-      "ТВОЙ НОВЫЙ АИОГРАМ АККАУНТ\n\n" +
-      "Номер: " + account.virtual_number + "\n" +
-      "Код входа: " + account.code + "\n\n" +
-      "Код действует 10 минут и используется один раз. Не пересылай его другим.");
-  } catch (error) {
-    console.error("Account creation error:", error);
-    bot.sendMessage(msg.chat.id, "Ошибка создания аккаунта. Попробуй позже.");
-  }
-});
-
 app.get("/", (req, res) => res.send("АИОГРАМ работает"));
 app.get("/health", (req, res) => res.json({ status: "online", name: "АИОГРАМ" }));
 
-app.post("/auth/verify", authRateLimit, async (req, res) => {
+const emailAuthRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  key: req => "email-auth:" + (req.ip || req.socket.remoteAddress || "unknown")
+});
+
+function createAuthClient() {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false }
+  });
+}
+
+app.post("/auth/email/request", emailAuthRateLimit, async (req, res) => {
   try {
-    const { number, code } = req.body || {};
-    if (typeof number !== "string" || typeof code !== "string" ||
-        !/^\+7\d{8}$/.test(number) || !/^\d{6}$/.test(code)) {
-      return res.status(400).json({ error: "Неверные данные" });
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    if (email.length > 254 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "Введи корректный email" });
+    }
+    const authClient = createAuthClient();
+    const { error } = await authClient.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true }
+    });
+    if (error) {
+      console.error("Email OTP request error:", error.message);
+      return res.status(400).json({ error: "Не удалось отправить код. Проверь email и попробуй позже." });
+    }
+    res.json({ success: true, message: "Код отправлен на почту" });
+  } catch (error) {
+    console.error("Email OTP request failed:", error);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.post("/auth/email/verify", emailAuthRateLimit, async (req, res) => {
+  try {
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
+    if (email.length > 254 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || !/^\\d{6}$/.test(code)) {
+      return res.status(400).json({ error: "Проверь email и шестизначный код" });
     }
 
-    const { data: account, error } = await db.from("accounts")
-      .select("id, virtual_number, username, login_code_hash, code_expires_at, failed_login_attempts")
-      .eq("virtual_number", number).eq("is_deleted", false).maybeSingle();
-
-    if (error || !account || !account.login_code_hash ||
-        !account.code_expires_at || new Date(account.code_expires_at).getTime() <= Date.now() ||
-        account.failed_login_attempts >= 5) {
-      return res.status(401).json({ error: "Неверный номер, код или срок действия кода истёк" });
+    const authClient = createAuthClient();
+    const { data: verified, error: verifyError } = await authClient.auth.verifyOtp({
+      email,
+      token: code,
+      type: "email"
+    });
+    if (verifyError || !verified?.user?.id || !verified.user.email) {
+      return res.status(401).json({ error: "Неверный или просроченный код" });
     }
 
-    if (!safeHashEqual(hash(code), account.login_code_hash)) {
-      await db.from("accounts")
-        .update({ failed_login_attempts: account.failed_login_attempts + 1 })
-        .eq("id", account.id)
-        .eq("login_code_hash", account.login_code_hash);
-      return res.status(401).json({ error: "Неверный номер или код" });
+    const authUserId = verified.user.id;
+    const verifiedEmail = verified.user.email.toLowerCase();
+    let { data: account, error: lookupError } = await db.from("accounts")
+      .select("id, virtual_number, username, email, stars, is_deleted")
+      .eq("auth_user_id", authUserId).maybeSingle();
+    if (lookupError) throw lookupError;
+
+    if (!account) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const number = randomNumber();
+        const { data: created, error: createError } = await db.from("accounts").insert({
+          auth_user_id: authUserId,
+          email: verifiedEmail,
+          virtual_number: number,
+          username: verifiedEmail.split("@")[0].slice(0, 32) || "Новый пользователь"
+        }).select("id, virtual_number, username, email, stars, is_deleted").single();
+
+        if (!createError) {
+          account = created;
+          break;
+        }
+        if (createError.code === "23505") {
+          const existing = await db.from("accounts").select("id, virtual_number, username, email, stars, is_deleted")
+            .eq("auth_user_id", authUserId).maybeSingle();
+          if (existing.error) throw existing.error;
+          if (existing.data) { account = existing.data; break; }
+          continue;
+        }
+        throw createError;
+      }
+      if (!account) throw new Error("Не удалось создать уникальный номер аккаунта");
+
+      if (OWNER_EMAIL && verifiedEmail === String(OWNER_EMAIL).trim().toLowerCase()) {
+        const { error: roleError } = await db.from("account_admins")
+          .upsert({ account_id: account.id, role: "owner" });
+        if (roleError) throw roleError;
+        await db.from("admin_logs").insert({
+          actor_account_id: account.id,
+          action: "owner_bootstrapped",
+          target_account_id: account.id,
+          metadata: { source: "verified_email_otp" }
+        });
+      }
     }
 
-    const { data: consumed, error: consumeError } = await db.from("accounts")
-      .update({ login_code_hash: null, code_expires_at: null })
-      .eq("id", account.id)
-      .eq("login_code_hash", account.login_code_hash)
-      .gt("code_expires_at", new Date().toISOString())
-      .lt("failed_login_attempts", 5)
-      .select("id").maybeSingle();
-
-    if (consumeError) throw consumeError;
-    if (!consumed) return res.status(401).json({ error: "Код уже использован или истёк" });
+    if (account.is_deleted) {
+      return res.status(403).json({ error: "Этот аккаунт отключён" });
+    }
 
     const token = crypto.randomBytes(32).toString("hex");
     const { error: sessionError } = await db.from("sessions").insert({
@@ -221,10 +219,10 @@ app.post("/auth/verify", authRateLimit, async (req, res) => {
     if (sessionError) throw sessionError;
 
     res.json({ success: true, token, account: {
-      number: account.virtual_number, username: account.username
+      number: account.virtual_number, username: account.username, email: account.email
     }});
   } catch (error) {
-    console.error("Login error:", error);
+    console.error("Email login error:", error);
     res.status(500).json({ error: "Ошибка сервера" });
   }
 });
@@ -232,7 +230,7 @@ app.post("/auth/verify", authRateLimit, async (req, res) => {
 app.get("/auth/me", requireUser, (req, res) => {
   const { account } = req.auth;
   res.json({ success: true, account: {
-    number: account.virtual_number, username: account.username, stars: account.stars
+    number: account.virtual_number, username: account.username, email: account.email, stars: account.stars
   }});
 });
 
@@ -277,7 +275,7 @@ app.get("/admin/accounts", requireUser, requireAdmin, async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 50);
     const { data, error } = await db.from("accounts")
-      .select("id, virtual_number, username, stars, is_deleted, created_at")
+      .select("id, virtual_number, username, email, stars, is_deleted, created_at")
       .order("created_at", { ascending: false }).limit(limit);
     if (error) throw error;
     res.json({ success: true, accounts: data });

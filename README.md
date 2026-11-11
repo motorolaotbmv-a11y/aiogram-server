@@ -13,6 +13,7 @@ Backend АИОГРАМ на Node.js, Express и Supabase. Регистрация
 Добавь их в настройки хостинга (например, Render → Environment):
 
 - `SUPABASE_URL` — Project URL из Supabase
+- `SUPABASE_ANON_KEY` — публичный anon key из Supabase (или `SUPABASE_PUBLISHABLE_KEY`, если проект использует новый формат ключей)
 - `SUPABASE_SERVICE_ROLE_KEY` — секретный service role key. Только на сервере, никогда во фронтенде или публичном репозитории
 - `CODE_SECRET` — длинная случайная секретная строка для HMAC-хеширования сессионных токенов
 - `OWNER_EMAIL` — подтверждённый email владельца; только этот адрес автоматически получает роль owner

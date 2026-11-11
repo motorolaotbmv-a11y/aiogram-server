@@ -2,10 +2,12 @@ const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 const crypto = require("crypto");
+const path = require("path");
 
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
+app.use("/panel", express.static(path.join(__dirname, "public"), { index: "admin.html" }));
 
 const {
   BOT_TOKEN,

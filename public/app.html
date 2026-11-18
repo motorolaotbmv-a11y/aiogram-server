@@ -38,6 +38,20 @@ input:focus{border-color:#78aaff;box-shadow:0 0 0 3px #78aaff20}
 .composer{padding:13px 16px calc(13px + env(safe-area-inset-bottom));display:flex;gap:10px;border-top:1px solid #29384e;background:#111d2d}
 .composer input{flex:1}.send{padding:0 20px;border-radius:13px;background:#4388ed;color:white;font-weight:800}
 .notice{padding:10px 14px;font-size:12px;color:#91a5c1;text-align:center}
+.drawer-backdrop{position:fixed;inset:0;background:#0009;z-index:20}
+.drawer{position:fixed;z-index:21;left:0;top:0;bottom:0;width:min(88vw,370px);overflow:auto;padding:20px;background:#111d2d;border-right:1px solid #354966;box-shadow:20px 0 60px #0008}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.drawer-title{font-size:19px;font-weight:850}
+.setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 0;border-top:1px solid #29384e;border-bottom:1px solid #29384e}
+.setting-copy{font-weight:750}.setting-copy small{display:block;margin-top:6px;color:#91a5c1;font-size:12px;font-weight:400;line-height:1.45}
+.toggle{width:48px;height:28px;accent-color:#4388ed;flex:0 0 auto}
+.archive-title{font-weight:800;margin:22px 0 10px}
+.archive-item{padding:12px;margin-bottom:9px;border:1px solid #2b3c55;border-radius:13px;background:#0d1726}
+.archive-meta{font-size:11px;color:#91a5c1;margin-bottom:7px}
+.archive-content{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;padding-right:24px}
+.archive-remove{float:right;background:transparent;color:#ff9ba8;font-size:18px;padding:0 4px}
+.delete-message{float:right;margin-left:8px;background:transparent;color:#ffb1ba;font-size:14px;padding:0 2px}
+.drawer-empty{color:#91a5c1;font-size:13px;padding:14px 2px;line-height:1.5}
 @media(max-width:700px){#app{grid-template-columns:1fr}.sidebar{border-right:0}.conversation{display:none}.conversation.mobile-open{display:flex;position:fixed;inset:0;z-index:2}.conversation.mobile-open~.sidebar{display:none}.chat-head .back{display:block}.top{height:64px}}
 </style>
 </head>
@@ -54,8 +68,18 @@ input:focus{border-color:#78aaff;box-shadow:0 0 0 3px #78aaff20}
  </main>
 </section>
 <section id="app" class="hidden">
+ <div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+ <aside id="featureDrawer" class="drawer hidden" aria-label="Дополнительные функции">
+  <div class="drawer-head"><div class="drawer-title">Функции АИОГРАМ</div><button id="closeDrawer" class="icon-btn" aria-label="Закрыть">×</button></div>
+  <div class="setting-row">
+   <div class="setting-copy">Удалённые сообщения<small>Архивирование включается только когда все участники конкретного чата тоже включили эту функцию. При удалении сообщения участники заранее знают, что оно может попасть в архив.</small></div>
+   <input id="archiveToggle" class="toggle" type="checkbox" aria-label="Включить архив удалённых сообщений">
+  </div>
+  <div class="archive-title">Архив удалённых сообщений</div>
+  <div id="archiveList"><div class="drawer-empty">Загружаем архив…</div></div>
+ </aside>
  <aside class="sidebar">
-  <header class="top"><div><div class="logo">АИО<span>ГРАМ</span></div><div class="account" id="myNumber"></div></div><button id="newChat" class="icon-btn" aria-label="Новый чат">＋</button></header>
+  <header class="top"><div><div class="logo">АИО<span>ГРАМ</span></div><div class="account" id="myNumber"></div></div><div style="display:flex;gap:8px"><button id="openFeatures" class="icon-btn" aria-label="Функции">☰</button><button id="newChat" class="icon-btn" aria-label="Новый чат">＋</button></div></header>
   <div class="search"><input id="filterChats" placeholder="Поиск по чатам"></div>
   <div id="chatList" class="chat-list"><div class="empty-list">Загружаем чаты…</div></div>
   <div class="notice"><button id="logout" style="background:none;color:#91a5c1">Выйти из аккаунта</button></div>
@@ -147,6 +171,19 @@ async function loadMessages(id){
  if(!data.messages?.length){const hint=document.createElement("div");hint.className="hint";hint.textContent="Это начало вашей переписки. Напиши первое сообщение";box.append(hint);return}
  for(const message of data.messages){
   const bubble=document.createElement("div");bubble.className="bubble"+(message.is_self?" self":"");
+  if(message.is_self){
+   const remove=document.createElement("button");remove.className="delete-message";remove.type="button";remove.textContent="×";remove.title="Удалить у всех";
+   remove.addEventListener("click",async()=>{
+    if(!confirm("Удалить это сообщение у всех участников чата?"))return;
+    remove.disabled=true;
+    try{
+     const result=await request("/api/chats/"+encodeURIComponent(id)+"/messages/"+encodeURIComponent(message.id),{method:"DELETE"});
+     await loadMessages(id);await loadChats();await loadArchive();
+     if(!result.archived) alert("Сообщение удалено. Архив не создан: не все участники включили эту функцию.");
+    }catch(error){alert(error.message);remove.disabled=false}
+   });
+   bubble.append(remove);
+  }
   const content=document.createElement("div");content.textContent=escapeText(message.content);
   const time=document.createElement("span");time.className="time";time.textContent=formatTime(message.created_at);
   bubble.append(content,time);box.append(bubble);
@@ -167,6 +204,45 @@ $("newChat").addEventListener("click",async()=>{
   const data=await request("/api/chats/direct",{method:"POST",body:JSON.stringify({number:number.trim()})});
   await loadChats();const chat=chats.find(c=>c.id===data.chat_id);if(chat)await openChat(chat);
  }catch(error){alert(error.message)}
+});
+async function loadArchive(){
+ const list=$("archiveList");if(!list)return;
+ try{
+  const data=await request("/api/deleted-messages");list.replaceChildren();
+  if(!data.items?.length){const empty=document.createElement("div");empty.className="drawer-empty";empty.textContent="Пока нет удалённых сообщений. Архив появится, если все участники чата включили эту функцию до удаления.";list.append(empty);return}
+  for(const item of data.items){
+   const card=document.createElement("div");card.className="archive-item";
+   const remove=document.createElement("button");remove.className="archive-remove";remove.type="button";remove.textContent="×";remove.title="Убрать из архива";
+   remove.addEventListener("click",async()=>{
+    remove.disabled=true;
+    try{await request("/api/deleted-messages/"+encodeURIComponent(item.id),{method:"DELETE"});await loadArchive()}
+    catch(error){alert(error.message);remove.disabled=false}
+   });
+   const meta=document.createElement("div");meta.className="archive-meta";
+   meta.textContent=(item.sender||"Пользователь")+" · "+formatTime(item.message_created_at)+" · удалено "+formatTime(item.deleted_at);
+   const content=document.createElement("div");content.className="archive-content";content.textContent=item.content;
+   card.append(remove,meta,content);list.append(card);
+  }
+ }catch(error){list.textContent=error.message}
+}
+async function openFeatures(){
+ $("drawerBackdrop").classList.remove("hidden");$("featureDrawer").classList.remove("hidden");
+ try{
+  const settings=await request("/api/deleted-messages/settings");
+  $("archiveToggle").checked=!!settings.enabled;
+  await loadArchive();
+ }catch(error){$("archiveList").textContent=error.message}
+}
+$("openFeatures").addEventListener("click",openFeatures);
+$("closeDrawer").addEventListener("click",()=>{$("drawerBackdrop").classList.add("hidden");$("featureDrawer").classList.add("hidden")});
+$("drawerBackdrop").addEventListener("click",()=>{$("drawerBackdrop").classList.add("hidden");$("featureDrawer").classList.add("hidden")});
+$("archiveToggle").addEventListener("change",async()=>{
+ const toggle=$("archiveToggle");toggle.disabled=true;
+ try{
+  await request("/api/deleted-messages/settings",{method:"PUT",body:JSON.stringify({enabled:toggle.checked})});
+  await loadArchive();
+ }catch(error){toggle.checked=!toggle.checked;alert(error.message)}
+ finally{toggle.disabled=false}
 });
 $("back").addEventListener("click",()=>$("conversation").classList.remove("mobile-open"));
 $("logout").addEventListener("click",async()=>{

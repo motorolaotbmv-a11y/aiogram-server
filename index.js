@@ -433,6 +433,119 @@ app.post("/api/chats/:id/messages", requireUser, requireChatIdentity, chatRateLi
   }
 });
 
+// Настройки и архив удалённых сообщений. Архив создаётся только если ВСЕ участники чата заранее включили эту функцию.
+app.get("/api/deleted-messages/settings", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const { data, error } = await db.from("deleted_message_preferences")
+      .select("enabled").eq("user_id", req.userId).maybeSingle();
+    if (error) throw error;
+    res.json({ success: true, enabled: !!data?.enabled });
+  } catch (error) {
+    console.error("Deleted-message settings error:", error);
+    res.status(500).json({ error: "Не удалось загрузить настройку" });
+  }
+});
+
+app.put("/api/deleted-messages/settings", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    if (typeof req.body?.enabled !== "boolean") {
+      return res.status(400).json({ error: "Укажи включено или выключено" });
+    }
+    const { error } = await db.from("deleted_message_preferences").upsert({
+      user_id: req.userId, enabled: req.body.enabled, updated_at: new Date().toISOString()
+    }, { onConflict: "user_id" });
+    if (error) throw error;
+    res.json({ success: true, enabled: req.body.enabled });
+  } catch (error) {
+    console.error("Update deleted-message settings error:", error);
+    res.status(500).json({ error: "Не удалось сохранить настройку" });
+  }
+});
+
+app.get("/api/deleted-messages", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const { data: items, error } = await db.from("deleted_message_archive")
+      .select("id, message_id, chat_id, sender_id, content, message_created_at, deleted_at")
+      .eq("owner_id", req.userId).order("deleted_at", { ascending: false }).limit(200);
+    if (error) throw error;
+    const senderIds = [...new Set((items || []).map(item => item.sender_id))];
+    let accounts = [];
+    if (senderIds.length) {
+      const result = await db.from("accounts")
+        .select("auth_user_id, username, virtual_number").in("auth_user_id", senderIds);
+      if (result.error) throw result.error;
+      accounts = result.data || [];
+    }
+    const accountById = new Map(accounts.map(account => [account.auth_user_id, account]));
+    res.json({ success: true, items: (items || []).map(item => ({
+      id: item.id, chat_id: item.chat_id, content: item.content,
+      message_created_at: item.message_created_at, deleted_at: item.deleted_at,
+      sender: accountById.get(item.sender_id)?.username || accountById.get(item.sender_id)?.virtual_number || "Пользователь"
+    })) });
+  } catch (error) {
+    console.error("Deleted-message archive error:", error);
+    res.status(500).json({ error: "Не удалось загрузить архив" });
+  }
+});
+
+app.delete("/api/deleted-messages/:id", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const { error } = await db.from("deleted_message_archive").delete()
+      .eq("id", req.params.id).eq("owner_id", req.userId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete archive item error:", error);
+    res.status(500).json({ error: "Не удалось удалить запись из архива" });
+  }
+});
+
+app.delete("/api/chats/:id/messages/:messageId", requireUser, requireChatIdentity, chatRateLimit, async (req, res) => {
+  try {
+    const { data: membership, error: membershipError } = await db.from("chat_members")
+      .select("chat_id").eq("chat_id", req.params.id).eq("user_id", req.userId).maybeSingle();
+    if (membershipError) throw membershipError;
+    if (!membership) return res.status(404).json({ error: "Чат не найден" });
+
+    const { data: message, error: messageError } = await db.from("messages")
+      .select("id, chat_id, sender_id, content, created_at")
+      .eq("id", req.params.messageId).eq("chat_id", req.params.id).maybeSingle();
+    if (messageError) throw messageError;
+    if (!message) return res.status(404).json({ error: "Сообщение уже удалено" });
+    if (message.sender_id !== req.userId) {
+      return res.status(403).json({ error: "Можно удалить только своё сообщение" });
+    }
+
+    const { data: members, error: membersError } = await db.from("chat_members")
+      .select("user_id").eq("chat_id", req.params.id);
+    if (membersError) throw membersError;
+    const memberIds = (members || []).map(member => member.user_id);
+    const { data: preferences, error: preferencesError } = await db.from("deleted_message_preferences")
+      .select("user_id, enabled").in("user_id", memberIds);
+    if (preferencesError) throw preferencesError;
+
+    const enabledIds = new Set((preferences || []).filter(item => item.enabled).map(item => item.user_id));
+    const archiveForEveryone = memberIds.length > 0 && memberIds.every(id => enabledIds.has(id));
+    if (archiveForEveryone) {
+      const rows = memberIds.map(ownerId => ({
+        message_id: message.id, chat_id: message.chat_id, owner_id: ownerId,
+        sender_id: message.sender_id, content: message.content,
+        message_created_at: message.created_at
+      }));
+      const { error: archiveError } = await db.from("deleted_message_archive").insert(rows);
+      if (archiveError) throw archiveError;
+    }
+
+    const { error: deleteError } = await db.from("messages")
+      .delete().eq("id", message.id).eq("chat_id", req.params.id).eq("sender_id", req.userId);
+    if (deleteError) throw deleteError;
+    res.json({ success: true, archived: archiveForEveryone });
+  } catch (error) {
+    console.error("Delete chat message error:", error);
+    res.status(500).json({ error: "Не удалось удалить сообщение" });
+  }
+});
+
 // Админ API: сведения об аккаунтах и управлении доступом.
 // Содержимое личных переписок этим API не раскрывается.
 app.get("/admin/me", requireUser, requireAdmin, (req, res) => {
